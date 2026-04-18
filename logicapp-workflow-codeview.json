@@ -29,11 +29,20 @@
             }
         },
         "triggers": {
-            "Recurrence": {
-                "type": "Recurrence",
-                "recurrence": {
-                    "frequency": "Hour",
-                    "interval": 1
+            "manual": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "workItemId": {
+                                "type": "integer",
+                                "description": "The ID of the work item to process."
+                            }
+                        },
+                        "required": [ "workItemId" ]
+                    }
                 }
             }
         },
@@ -51,85 +60,59 @@
                     ]
                 }
             },
-            "2_Run_WIQL_Query": {
+            "2_Get_Attachments": {
                 "type": "Http",
                 "runAfter": {
                     "1_Init_Auth_Header": [ "Succeeded" ]
                 },
                 "inputs": {
-                    "method": "POST",
-                    "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/wiql?api-version=7.1')}",
+                    "method": "GET",
+                    "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', triggerBody()?['workItemId'], '/attachments?api-version=7.1-preview.1')}",
                     "headers": {
-                        "Authorization": "@variables('DevOpsAuthHeader')",
-                        "Content-Type": "application/json"
-                    },
-                    "body": {
-                        "query": "SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND [System.State] <> 'Closed' ORDER BY [System.CreatedDate] DESC"
+                        "Authorization": "@variables('DevOpsAuthHeader')"
                     }
                 }
             },
-            "3_For_Each_WorkItem": {
-                "type": "Foreach",
+            "3_Download_First_PDF": {
+                "type": "Http",
                 "runAfter": {
-                    "2_Run_WIQL_Query": [ "Succeeded" ]
+                    "2_Get_Attachments": [ "Succeeded" ]
                 },
-                "foreach": "@body('2_Run_WIQL_Query')?['workItems']",
-                "runtimeConfiguration": {
-                    "concurrency": {
-                        "repetitions": 1
+                "inputs": {
+                    "method": "GET",
+                    "uri": "@{body('2_Get_Attachments')?['value'][0]['url']}",
+                    "headers": {
+                        "Authorization": "@variables('DevOpsAuthHeader')"
                     }
+                }
+            },
+            "4_Send_To_Document_Intelligence": {
+                "type": "Http",
+                "runAfter": {
+                    "3_Download_First_PDF": [ "Succeeded" ]
                 },
-                "actions": {
-                    "3a_Get_Attachments": {
-                        "type": "Http",
-                        "inputs": {
-                            "method": "GET",
-                            "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', item()?['id'], '/attachments?api-version=7.1-preview.1')}",
-                            "headers": {
-                                "Authorization": "@variables('DevOpsAuthHeader')"
-                            }
-                        }
+                "inputs": {
+                    "method": "POST",
+                    "uri": "@{concat(parameters('DocIntel_Endpoint'), '/formrecognizer/documentModels/', parameters('DocIntel_Model'), ':analyze?api-version=2023-07-31')}",
+                    "headers": {
+                        "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')",
+                        "Content-Type": "application/pdf"
                     },
-                    "3b_For_Each_Attachment": {
-                        "type": "Foreach",
-                        "runAfter": {
-                            "3a_Get_Attachments": [ "Succeeded" ]
-                        },
-                        "foreach": "@body('3a_Get_Attachments')?['value']",
-                        "runtimeConfiguration": {
-                            "concurrency": {
-                                "repetitions": 1
-                            }
-                        },
-                        "actions": {
-                            "3b1_Download_File": {
-                                "type": "Http",
-                                "inputs": {
-                                    "method": "GET",
-                                    "uri": "@item()?['url']",
-                                    "headers": {
-                                        "Authorization": "@variables('DevOpsAuthHeader')"
-                                    }
-                                }
-                            },
-                            "3b2_Send_To_Document_Intelligence": {
-                                "type": "Http",
-                                "runAfter": {
-                                    "3b1_Download_File": [ "Succeeded" ]
-                                },
-                                "inputs": {
-                                    "method": "POST",
-                                    "uri": "@{concat(parameters('DocIntel_Endpoint'), '/formrecognizer/documentModels/', parameters('DocIntel_Model'), ':analyze?api-version=2023-07-31')}",
-                                    "headers": {
-                                        "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')",
-                                        "Content-Type": "application/pdf"
-                                    },
-                                    "body": "@body('3b1_Download_File')"
-                                },
-                                "operationOptions": "DisableAsyncPattern"
-                            }
-                        }
-                    }
+                    "body": "@body('3_Download_First_PDF')"
+                },
+                "operationOptions": "DisableAsyncPattern"
+            },
+            "5_Return_Response": {
+                "type": "Response",
+                "runAfter": {
+                    "4_Send_To_Document_Intelligence": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "statusCode": 200,
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "body": "@body('4_Send_To_Document_Intelligence')"
                 }
             }
         },
