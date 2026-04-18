@@ -3,6 +3,10 @@
         "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
         "contentVersion": "1.0.0.0",
         "parameters": {
+            "$connections": {
+                "defaultValue": {},
+                "type": "Object"
+            },
             "DevOps_Org": {
                 "type": "string",
                 "defaultValue": "REPLACE_YOUR_ORG_NAME"
@@ -22,10 +26,6 @@
             "DocIntel_Key": {
                 "type": "securestring",
                 "defaultValue": "REPLACE_YOUR_DOCUMENT_INTELLIGENCE_KEY"
-            },
-            "DocIntel_Model": {
-                "type": "string",
-                "defaultValue": "prebuilt-document"
             }
         },
         "triggers": {
@@ -38,7 +38,7 @@
                         "properties": {
                             "workItemId": {
                                 "type": "integer",
-                                "description": "The ID of the work item to process."
+                                "description": "The DevOps work item ID to process."
                             }
                         },
                         "required": [ "workItemId" ]
@@ -47,75 +47,77 @@
             }
         },
         "actions": {
-            "1_Init_Auth_Header": {
-                "type": "InitializeVariable",
-                "runAfter": {},
-                "inputs": {
-                    "variables": [
-                        {
-                            "name": "DevOpsAuthHeader",
-                            "type": "string",
-                            "value": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
-                        }
-                    ]
-                }
-            },
-            "2_Get_Attachments": {
+            "1_Get_Attachments": {
                 "type": "Http",
-                "runAfter": {
-                    "1_Init_Auth_Header": [ "Succeeded" ]
-                },
+                "runAfter": {},
                 "inputs": {
                     "method": "GET",
                     "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', triggerBody()?['workItemId'], '/attachments?api-version=7.1-preview.1')}",
                     "headers": {
-                        "Authorization": "@variables('DevOpsAuthHeader')"
+                        "Authorization": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
                     }
                 }
             },
-            "3_Download_First_PDF": {
+            "2_Download_PDF": {
                 "type": "Http",
                 "runAfter": {
-                    "2_Get_Attachments": [ "Succeeded" ]
+                    "1_Get_Attachments": [ "Succeeded" ]
                 },
                 "inputs": {
                     "method": "GET",
-                    "uri": "@{body('2_Get_Attachments')?['value'][0]['url']}",
+                    "uri": "@{body('1_Get_Attachments')?['value'][0]['url']}",
                     "headers": {
-                        "Authorization": "@variables('DevOpsAuthHeader')"
+                        "Authorization": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
                     }
                 }
             },
-            "4_Send_To_Document_Intelligence": {
+            "3_Submit_To_Document_Intelligence": {
                 "type": "Http",
                 "runAfter": {
-                    "3_Download_First_PDF": [ "Succeeded" ]
+                    "2_Download_PDF": [ "Succeeded" ]
                 },
                 "inputs": {
                     "method": "POST",
-                    "uri": "@{concat(parameters('DocIntel_Endpoint'), '/formrecognizer/documentModels/', parameters('DocIntel_Model'), ':analyze?api-version=2023-07-31')}",
+                    "uri": "@{concat(parameters('DocIntel_Endpoint'), '/formrecognizer/documentModels/prebuilt-document:analyze?api-version=2023-07-31')}",
                     "headers": {
                         "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')",
                         "Content-Type": "application/pdf"
                     },
-                    "body": "@body('3_Download_First_PDF')"
-                },
-                "operationOptions": "DisableAsyncPattern"
+                    "body": "@body('2_Download_PDF')"
+                }
             },
-            "5_Return_Response": {
+            "4_Get_Analysis_Result": {
+                "type": "Http",
+                "runAfter": {
+                    "3_Submit_To_Document_Intelligence": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "method": "GET",
+                    "uri": "@{outputs('3_Submit_To_Document_Intelligence')?['headers']?['Operation-Location']}",
+                    "headers": {
+                        "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')"
+                    }
+                }
+            },
+            "5_Return_Result": {
                 "type": "Response",
                 "runAfter": {
-                    "4_Send_To_Document_Intelligence": [ "Succeeded" ]
+                    "4_Get_Analysis_Result": [ "Succeeded" ]
                 },
                 "inputs": {
                     "statusCode": 200,
                     "headers": {
                         "Content-Type": "application/json"
                     },
-                    "body": "@body('4_Send_To_Document_Intelligence')"
+                    "body": "@body('4_Get_Analysis_Result')"
                 }
             }
         },
         "outputs": {}
+    },
+    "parameters": {
+        "$connections": {
+            "value": {}
+        }
     }
 }
