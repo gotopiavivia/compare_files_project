@@ -47,34 +47,64 @@
             }
         },
         "actions": {
-            "1_Get_Attachments": {
+            "1_Get_WorkItem": {
                 "type": "Http",
                 "runAfter": {},
                 "inputs": {
                     "method": "GET",
-                    "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', triggerBody()?['workItemId'], '/attachments?api-version=7.1-preview.1')}",
+                    "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', triggerBody()?['workItemId'], '?$expand=relations&api-version=7.1')}",
                     "headers": {
                         "Authorization": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
                     }
                 }
             },
-            "2_Download_PDF": {
+            "2_Init_PDF_URL": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "1_Get_WorkItem": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "PdfUrl",
+                            "type": "string",
+                            "value": "@{first(where(body('1_Get_WorkItem')?['relations'], item(), equals(item()?['rel'], 'AttachedFile')))?['url']}"
+                        }
+                    ]
+                }
+            },
+            "3_Init_PDF_FileName": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "2_Init_PDF_URL": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "PdfFileName",
+                            "type": "string",
+                            "value": "@{first(where(body('1_Get_WorkItem')?['relations'], item(), equals(item()?['rel'], 'AttachedFile')))?['attributes']?['name']}"
+                        }
+                    ]
+                }
+            },
+            "4_Download_PDF": {
                 "type": "Http",
                 "runAfter": {
-                    "1_Get_Attachments": [ "Succeeded" ]
+                    "3_Init_PDF_FileName": [ "Succeeded" ]
                 },
                 "inputs": {
                     "method": "GET",
-                    "uri": "@{body('1_Get_Attachments')?['value'][0]['url']}",
+                    "uri": "@{concat(variables('PdfUrl'), '?fileName=', variables('PdfFileName'))}",
                     "headers": {
                         "Authorization": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
                     }
                 }
             },
-            "3_Submit_To_Document_Intelligence": {
+            "5_Submit_To_Document_Intelligence": {
                 "type": "Http",
                 "runAfter": {
-                    "2_Download_PDF": [ "Succeeded" ]
+                    "4_Download_PDF": [ "Succeeded" ]
                 },
                 "inputs": {
                     "method": "POST",
@@ -83,33 +113,45 @@
                         "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')",
                         "Content-Type": "application/pdf"
                     },
-                    "body": "@body('2_Download_PDF')"
+                    "body": "@body('4_Download_PDF')"
                 }
             },
-            "4_Get_Analysis_Result": {
+            "6_Wait_15_Seconds": {
+                "type": "Wait",
+                "runAfter": {
+                    "5_Submit_To_Document_Intelligence": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "interval": {
+                        "count": 15,
+                        "unit": "Second"
+                    }
+                }
+            },
+            "7_Get_Analysis_Result": {
                 "type": "Http",
                 "runAfter": {
-                    "3_Submit_To_Document_Intelligence": [ "Succeeded" ]
+                    "6_Wait_15_Seconds": [ "Succeeded" ]
                 },
                 "inputs": {
                     "method": "GET",
-                    "uri": "@{outputs('3_Submit_To_Document_Intelligence')?['headers']?['Operation-Location']}",
+                    "uri": "@{outputs('5_Submit_To_Document_Intelligence')?['headers']?['Operation-Location']}",
                     "headers": {
                         "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')"
                     }
                 }
             },
-            "5_Return_Result": {
+            "8_Return_Result": {
                 "type": "Response",
                 "runAfter": {
-                    "4_Get_Analysis_Result": [ "Succeeded" ]
+                    "7_Get_Analysis_Result": [ "Succeeded" ]
                 },
                 "inputs": {
                     "statusCode": 200,
                     "headers": {
                         "Content-Type": "application/json"
                     },
-                    "body": "@body('4_Get_Analysis_Result')"
+                    "body": "@body('7_Get_Analysis_Result')"
                 }
             }
         },
