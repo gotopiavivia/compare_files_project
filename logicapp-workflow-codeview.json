@@ -1,0 +1,532 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {
+            "DevOps_Org": {
+                "type": "string",
+                "defaultValue": "REPLACE_YOUR_ORG_NAME"
+            },
+            "DevOps_Project": {
+                "type": "string",
+                "defaultValue": "REPLACE_YOUR_PROJECT_NAME"
+            },
+            "DevOps_PAT": {
+                "type": "securestring",
+                "defaultValue": "REPLACE_YOUR_PAT_TOKEN"
+            },
+            "WIQL_Query": {
+                "type": "string",
+                "defaultValue": "SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND [System.State] <> 'Closed' ORDER BY [System.CreatedDate] DESC"
+            },
+            "DocIntel_Endpoint": {
+                "type": "string",
+                "defaultValue": "REPLACE_https://YOUR_INSTANCE.cognitiveservices.azure.com"
+            },
+            "DocIntel_Key": {
+                "type": "securestring",
+                "defaultValue": "REPLACE_YOUR_DOCUMENT_INTELLIGENCE_KEY"
+            },
+            "DocIntel_Model": {
+                "type": "string",
+                "defaultValue": "prebuilt-document"
+            },
+            "Processed_Tag": {
+                "type": "string",
+                "defaultValue": "PDF-Processed"
+            }
+        },
+        "triggers": {
+            "manual": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "workItemId": {
+                                "type": "integer",
+                                "description": "Optional. Provide a single work item ID to process just that one. Leave empty to run the full WIQL query."
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "actions": {
+            "1_Init_Results": {
+                "type": "InitializeVariable",
+                "runAfter": {},
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "Results",
+                            "type": "array",
+                            "value": []
+                        }
+                    ]
+                }
+            },
+            "2_Init_Auth_Header": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "1_Init_Results": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "DevOpsAuthHeader",
+                            "type": "string",
+                            "value": "@{concat('Basic ', base64(concat(':', parameters('DevOps_PAT'))))}"
+                        }
+                    ]
+                }
+            },
+            "3_Init_WorkItem_IDs": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "2_Init_Auth_Header": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "WorkItemIds",
+                            "type": "array",
+                            "value": []
+                        }
+                    ]
+                }
+            },
+            "4_Init_OperationUrl": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "3_Init_WorkItem_IDs": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "OperationUrl",
+                            "type": "string",
+                            "value": ""
+                        }
+                    ]
+                }
+            },
+            "5_Init_AnalysisStatus": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "4_Init_OperationUrl": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "AnalysisStatus",
+                            "type": "string",
+                            "value": "running"
+                        }
+                    ]
+                }
+            },
+            "6_Init_AnalysisResult": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "5_Init_AnalysisStatus": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "AnalysisResult",
+                            "type": "object",
+                            "value": {}
+                        }
+                    ]
+                }
+            },
+            "7_Init_PollCount": {
+                "type": "InitializeVariable",
+                "runAfter": {
+                    "6_Init_AnalysisResult": [ "Succeeded" ]
+                },
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "PollCount",
+                            "type": "integer",
+                            "value": 0
+                        }
+                    ]
+                }
+            },
+            "8_Single_Or_Batch": {
+                "type": "If",
+                "runAfter": {
+                    "7_Init_PollCount": [ "Succeeded" ]
+                },
+                "expression": {
+                    "and": [
+                        {
+                            "not": {
+                                "equals": [
+                                    "@triggerBody()?['workItemId']",
+                                    null
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "actions": {
+                    "8a_Set_Single_ID": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "WorkItemIds",
+                            "value": "@createArray(createObject('id', triggerBody()?['workItemId']))"
+                        }
+                    }
+                },
+                "else": {
+                    "actions": {
+                        "8b_Run_WIQL_Query": {
+                            "type": "Http",
+                            "inputs": {
+                                "method": "POST",
+                                "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/wiql?api-version=7.1')}",
+                                "headers": {
+                                    "Authorization": "@variables('DevOpsAuthHeader')",
+                                    "Content-Type": "application/json"
+                                },
+                                "body": {
+                                    "query": "@parameters('WIQL_Query')"
+                                }
+                            }
+                        },
+                        "8c_Set_Batch_IDs": {
+                            "type": "SetVariable",
+                            "runAfter": {
+                                "8b_Run_WIQL_Query": [ "Succeeded" ]
+                            },
+                            "inputs": {
+                                "name": "WorkItemIds",
+                                "value": "@body('8b_Run_WIQL_Query')?['workItems']"
+                            }
+                        }
+                    }
+                }
+            },
+            "9_For_Each_WorkItem": {
+                "type": "Foreach",
+                "runAfter": {
+                    "8_Single_Or_Batch": [ "Succeeded" ]
+                },
+                "foreach": "@variables('WorkItemIds')",
+                "runtimeConfiguration": {
+                    "concurrency": {
+                        "repetitions": 1
+                    }
+                },
+                "actions": {
+                    "9a_Get_WorkItem_Detail": {
+                        "type": "Http",
+                        "inputs": {
+                            "method": "GET",
+                            "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', item()?['id'], '?$expand=all&api-version=7.1')}",
+                            "headers": {
+                                "Authorization": "@variables('DevOpsAuthHeader')"
+                            }
+                        }
+                    },
+                    "9b_Check_Not_Processed": {
+                        "type": "If",
+                        "runAfter": {
+                            "9a_Get_WorkItem_Detail": [ "Succeeded" ]
+                        },
+                        "expression": {
+                            "and": [
+                                {
+                                    "not": {
+                                        "contains": [
+                                            "@string(body('9a_Get_WorkItem_Detail')?['fields']?['System.Tags'])",
+                                            "@parameters('Processed_Tag')"
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                        "actions": {
+                            "9c_Get_Attachments": {
+                                "type": "Http",
+                                "inputs": {
+                                    "method": "GET",
+                                    "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', item()?['id'], '/attachments?api-version=7.1-preview.1')}",
+                                    "headers": {
+                                        "Authorization": "@variables('DevOpsAuthHeader')"
+                                    }
+                                }
+                            },
+                            "9d_Filter_PDFs_Only": {
+                                "type": "Query",
+                                "runAfter": {
+                                    "9c_Get_Attachments": [ "Succeeded" ]
+                                },
+                                "inputs": {
+                                    "from": "@body('9c_Get_Attachments')?['value']",
+                                    "where": "@endsWith(toLower(item()?['attributes']?['name']), '.pdf')"
+                                }
+                            },
+                            "9e_Check_Has_PDF": {
+                                "type": "If",
+                                "runAfter": {
+                                    "9d_Filter_PDFs_Only": [ "Succeeded" ]
+                                },
+                                "expression": {
+                                    "and": [
+                                        {
+                                            "greater": [
+                                                "@length(body('9d_Filter_PDFs_Only'))",
+                                                0
+                                            ]
+                                        }
+                                    ]
+                                },
+                                "actions": {
+                                    "9f_For_Each_PDF": {
+                                        "type": "Foreach",
+                                        "foreach": "@body('9d_Filter_PDFs_Only')",
+                                        "runtimeConfiguration": {
+                                            "concurrency": {
+                                                "repetitions": 1
+                                            }
+                                        },
+                                        "actions": {
+                                            "9f1_Download_PDF": {
+                                                "type": "Http",
+                                                "inputs": {
+                                                    "method": "GET",
+                                                    "uri": "@item()?['url']",
+                                                    "headers": {
+                                                        "Authorization": "@variables('DevOpsAuthHeader')"
+                                                    }
+                                                }
+                                            },
+                                            "9f2_Reset_PollCount": {
+                                                "type": "SetVariable",
+                                                "runAfter": {
+                                                    "9f1_Download_PDF": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "name": "PollCount",
+                                                    "value": 0
+                                                }
+                                            },
+                                            "9f3_Reset_AnalysisStatus": {
+                                                "type": "SetVariable",
+                                                "runAfter": {
+                                                    "9f2_Reset_PollCount": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "name": "AnalysisStatus",
+                                                    "value": "running"
+                                                }
+                                            },
+                                            "9f4_Reset_AnalysisResult": {
+                                                "type": "SetVariable",
+                                                "runAfter": {
+                                                    "9f3_Reset_AnalysisStatus": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "name": "AnalysisResult",
+                                                    "value": {}
+                                                }
+                                            },
+                                            "9f5_Submit_To_DocIntel": {
+                                                "type": "Http",
+                                                "runAfter": {
+                                                    "9f4_Reset_AnalysisResult": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "method": "POST",
+                                                    "uri": "@{concat(parameters('DocIntel_Endpoint'), '/formrecognizer/documentModels/', parameters('DocIntel_Model'), ':analyze?api-version=2023-07-31')}",
+                                                    "headers": {
+                                                        "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')",
+                                                        "Content-Type": "application/pdf"
+                                                    },
+                                                    "body": "@body('9f1_Download_PDF')"
+                                                }
+                                            },
+                                            "9f6_Set_OperationUrl": {
+                                                "type": "SetVariable",
+                                                "runAfter": {
+                                                    "9f5_Submit_To_DocIntel": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "name": "OperationUrl",
+                                                    "value": "@outputs('9f5_Submit_To_DocIntel')?['headers']?['Operation-Location']"
+                                                }
+                                            },
+                                            "9f7_Poll_Until_Complete": {
+                                                "type": "Until",
+                                                "runAfter": {
+                                                    "9f6_Set_OperationUrl": [ "Succeeded" ]
+                                                },
+                                                "expression": "@or(equals(variables('AnalysisStatus'), 'succeeded'), equals(variables('AnalysisStatus'), 'failed'), greaterOrEquals(variables('PollCount'), 20))",
+                                                "limit": {
+                                                    "count": 20,
+                                                    "timeout": "PT3M"
+                                                },
+                                                "actions": {
+                                                    "9f7a_Wait_5s": {
+                                                        "type": "Wait",
+                                                        "inputs": {
+                                                            "interval": {
+                                                                "count": 5,
+                                                                "unit": "Second"
+                                                            }
+                                                        }
+                                                    },
+                                                    "9f7b_Poll_Status": {
+                                                        "type": "Http",
+                                                        "runAfter": {
+                                                            "9f7a_Wait_5s": [ "Succeeded" ]
+                                                        },
+                                                        "inputs": {
+                                                            "method": "GET",
+                                                            "uri": "@variables('OperationUrl')",
+                                                            "headers": {
+                                                                "Ocp-Apim-Subscription-Key": "@parameters('DocIntel_Key')"
+                                                            }
+                                                        }
+                                                    },
+                                                    "9f7c_Update_Status": {
+                                                        "type": "SetVariable",
+                                                        "runAfter": {
+                                                            "9f7b_Poll_Status": [ "Succeeded" ]
+                                                        },
+                                                        "inputs": {
+                                                            "name": "AnalysisStatus",
+                                                            "value": "@body('9f7b_Poll_Status')?['status']"
+                                                        }
+                                                    },
+                                                    "9f7d_Save_If_Done": {
+                                                        "type": "If",
+                                                        "runAfter": {
+                                                            "9f7c_Update_Status": [ "Succeeded" ]
+                                                        },
+                                                        "expression": {
+                                                            "and": [
+                                                                {
+                                                                    "equals": [
+                                                                        "@variables('AnalysisStatus')",
+                                                                        "succeeded"
+                                                                    ]
+                                                                }
+                                                            ]
+                                                        },
+                                                        "actions": {
+                                                            "9f7d1_Set_Result": {
+                                                                "type": "SetVariable",
+                                                                "inputs": {
+                                                                    "name": "AnalysisResult",
+                                                                    "value": "@body('9f7b_Poll_Status')?['analyzeResult']"
+                                                                }
+                                                            }
+                                                        },
+                                                        "else": { "actions": {} }
+                                                    },
+                                                    "9f7e_Increment_PollCount": {
+                                                        "type": "IncrementVariable",
+                                                        "runAfter": {
+                                                            "9f7d_Save_If_Done": [ "Succeeded", "Skipped" ]
+                                                        },
+                                                        "inputs": {
+                                                            "name": "PollCount",
+                                                            "value": 1
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "9f8_Build_Record": {
+                                                "type": "Compose",
+                                                "runAfter": {
+                                                    "9f7_Poll_Until_Complete": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "workItemId": "@item()?['id']",
+                                                    "workItemTitle": "@body('9a_Get_WorkItem_Detail')?['fields']?['System.Title']",
+                                                    "workItemState": "@body('9a_Get_WorkItem_Detail')?['fields']?['System.State']",
+                                                    "workItemType": "@body('9a_Get_WorkItem_Detail')?['fields']?['System.WorkItemType']",
+                                                    "attachmentName": "@item()?['attributes']?['name']",
+                                                    "attachmentUrl": "@item()?['url']",
+                                                    "analysisStatus": "@variables('AnalysisStatus')",
+                                                    "modelUsed": "@parameters('DocIntel_Model')",
+                                                    "extractedContent": {
+                                                        "keyValuePairs": "@variables('AnalysisResult')?['keyValuePairs']",
+                                                        "tables": "@variables('AnalysisResult')?['tables']",
+                                                        "paragraphs": "@variables('AnalysisResult')?['paragraphs']",
+                                                        "documents": "@variables('AnalysisResult')?['documents']",
+                                                        "pages": "@variables('AnalysisResult')?['pages']"
+                                                    },
+                                                    "processedAt": "@utcNow()"
+                                                }
+                                            },
+                                            "9f9_Append_Result": {
+                                                "type": "AppendToArrayVariable",
+                                                "runAfter": {
+                                                    "9f8_Build_Record": [ "Succeeded" ]
+                                                },
+                                                "inputs": {
+                                                    "name": "Results",
+                                                    "value": "@outputs('9f8_Build_Record')"
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "9g_Tag_WorkItem_Processed": {
+                                        "type": "Http",
+                                        "runAfter": {
+                                            "9f_For_Each_PDF": [ "Succeeded" ]
+                                        },
+                                        "inputs": {
+                                            "method": "PATCH",
+                                            "uri": "@{concat('https://dev.azure.com/', parameters('DevOps_Org'), '/', parameters('DevOps_Project'), '/_apis/wit/workitems/', item()?['id'], '?api-version=7.1')}",
+                                            "headers": {
+                                                "Authorization": "@variables('DevOpsAuthHeader')",
+                                                "Content-Type": "application/json-patch+json"
+                                            },
+                                            "body": [
+                                                {
+                                                    "op": "add",
+                                                    "path": "/fields/System.Tags",
+                                                    "value": "@{concat(body('9a_Get_WorkItem_Detail')?['fields']?['System.Tags'], '; ', parameters('Processed_Tag'))}"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                },
+                                "else": { "actions": {} }
+                            }
+                        },
+                        "else": { "actions": {} }
+                    }
+                }
+            },
+            "10_HTTP_Response": {
+                "type": "Response",
+                "runAfter": {
+                    "9_For_Each_WorkItem": [ "Succeeded", "Failed", "Skipped" ]
+                },
+                "inputs": {
+                    "statusCode": 200,
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "body": {
+                        "success": true,
+                        "totalProcessed": "@length(variables('Results'))",
+                        "processedAt": "@utcNow()",
+                        "results": "@variables('Results')"
+                    }
+                }
+            }
+        },
+        "outputs": {}
+    }
+}
